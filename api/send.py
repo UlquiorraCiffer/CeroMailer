@@ -78,20 +78,20 @@ class handler(BaseHTTPRequestHandler):
         receiver = strip_newlines(data.get("receiver"))
         subject = strip_newlines(data.get("subject")) or "(no subject)"
         body_text = data.get("body", "")
-        file_path = data.get("filePath")
+        file_paths = data.get("filePaths") or []
 
         if not EMAIL_REGEX.match(receiver):
             return self._send_json(400, {"error": "Invalid receiver email address"})
 
-        # --- 4. Fetch the file from Supabase Storage (uploaded there by the browser) ---
-        file_bytes = None
-        file_name = None
-        if file_path:
+        # --- 4. Fetch files from Supabase Storage (uploaded there by the client) ---
+        attachments = []  # list of (file_name, file_bytes) tuples
+        for fp in file_paths:
             try:
-                file_bytes = supabase.storage.from_("uploads").download(file_path)
-                file_name = file_path.split("/")[-1]
+                fb = supabase.storage.from_("uploads").download(fp)
+                fn = fp.split("/")[-1]
+                attachments.append((fn, fb))
             except Exception:
-                return self._send_json(400, {"error": "Could not fetch uploaded file"})
+                return self._send_json(400, {"error": f"Could not fetch uploaded file: {fp}"})
 
         # --- 5. Build and send the email — same pattern as testmail.py ---
         msg = EmailMessage()
@@ -100,7 +100,7 @@ class handler(BaseHTTPRequestHandler):
         msg["To"] = receiver
         msg.set_content(body_text)
 
-        if file_bytes:
+        for file_name, file_bytes in attachments:
             mime_type, _ = mimetypes.guess_type(file_name)
             if mime_type is None:
                 mime_type = "application/octet-stream"
@@ -115,12 +115,13 @@ class handler(BaseHTTPRequestHandler):
         except Exception:
             return self._send_json(500, {"error": "Failed to send email"})
 
-        # --- 6. Log the send, then clean up the temp file ---
+        # --- 6. Log the send, then clean up the temp files ---
+        logged_names = ", ".join(fn for fn, _ in attachments) or None
         supabase.table("send_logs").insert(
-            {"ip_address": ip, "receiver": receiver, "file_name": file_name}
+            {"ip_address": ip, "receiver": receiver, "file_name": logged_names}
         ).execute()
 
-        if file_path:
-            supabase.storage.from_("uploads").remove([file_path])
+        if file_paths:
+            supabase.storage.from_("uploads").remove(file_paths)
 
         return self._send_json(200, {"success": True})

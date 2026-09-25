@@ -38,14 +38,31 @@ def upload_file(file_path):
     return remote_path
 
 
-def send_email(receiver, subject, body, remote_path):
+def send_email(receiver, subject, body, remote_paths):
     payload = {
         "receiver": receiver,
         "subject": subject,
         "body": body,
-        "filePath": remote_path,
+        "filePaths": remote_paths,
     }
     return requests.post(VERCEL_API_URL, json=payload)
+
+def open_file_picker():
+    """Open the native OS file-picker (multi-select). Returns a tuple of paths (possibly empty)."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    root.update()
+
+    selected = filedialog.askopenfilenames(
+        title="Select files to attach",
+        parent=root,
+    )
+    root.destroy()
+    return selected
 
 
 def main():
@@ -53,25 +70,40 @@ def main():
     receiver = input("Receiver Gmail address: ").strip()
     subject = input("Subject: ").strip()
     body = input("Body: ").strip()
-    file_path = input("Full path of file to attach: ").strip()
 
-    if not os.path.isfile(file_path):
-        print("File not found.")
-        sys.exit(1)
+    print("\n  [1] Choose Files")
+    print("  [Enter] Skip — send without attachments\n")
+    choice = input(">> ").strip()
 
-    if os.path.getsize(file_path) > MAX_FILE_SIZE:
-        print("File too large (max 50MB).")
-        sys.exit(1)
+    if choice == "1":
+        file_paths = open_file_picker()
+    else:
+        file_paths = ()
 
-    print("Uploading file...")
-    try:
-        remote_path = upload_file(file_path)
-    except Exception as e:
-        print(f"Upload failed: {e}")
-        sys.exit(1)
+    # Validate each selected file
+    for fp in file_paths:
+        if not os.path.isfile(fp):
+            print(f"File not found: {fp}")
+            sys.exit(1)
+        if os.path.getsize(fp) > MAX_FILE_SIZE:
+            print(f"File too large (max 50MB): {fp}")
+            sys.exit(1)
+
+    # Upload each file
+    remote_paths = []
+    if file_paths:
+        print(f"Uploading {len(file_paths)} file(s)...")
+        for fp in file_paths:
+            try:
+                remote_paths.append(upload_file(fp))
+            except Exception as e:
+                print(f"Upload failed for {os.path.basename(fp)}: {e}")
+                sys.exit(1)
+    else:
+        print("No files selected — sending without attachments.")
 
     print("Sending email...")
-    response = send_email(receiver, subject, body, remote_path)
+    response = send_email(receiver, subject, body, remote_paths)
 
     if response.ok:
         print("Email sent!")

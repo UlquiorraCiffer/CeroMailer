@@ -33,7 +33,7 @@
     <input type="email" id="receiver" placeholder="Receiver Gmail address" required />
     <input type="text" id="subject" placeholder="Subject" required />
     <textarea id="body" placeholder="Body" rows="4"></textarea>
-    <input type="file" id="file" required />
+    <input type="file" id="file" multiple />
     <button type="submit">Send</button>
   </form>
   <p id="status"></p>
@@ -49,23 +49,32 @@
     document.getElementById('sendForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const status = document.getElementById('status');
-      const file = document.getElementById('file').files[0];
+      const files = document.getElementById('file').files;
 
-      if (file.size > MAX_FILE_SIZE) {
-        status.textContent = 'File too large (max 50MB).';
-        return;
+      // Validate per-file size
+      for (const file of files) {
+        if (file.size > MAX_FILE_SIZE) {
+          status.textContent = `File "${file.name}" is too large (max 50MB).`;
+          return;
+        }
       }
 
-      status.textContent = 'Uploading file...';
-      const filePath = `${Date.now()}_${file.name}`;
+      // Upload each selected file (if any)
+      const filePaths = [];
+      if (files.length > 0) {
+        status.textContent = `Uploading ${files.length} file(s)...`;
+        for (const file of files) {
+          const remotePath = `${Date.now()}_${file.name}`;
+          const { error: uploadError } = await supabaseClient.storage
+            .from('uploads')
+            .upload(remotePath, file);
 
-      const { error: uploadError } = await supabaseClient.storage
-        .from('uploads')
-        .upload(filePath, file);
-
-      if (uploadError) {
-        status.textContent = 'Upload failed: ' + uploadError.message;
-        return;
+          if (uploadError) {
+            status.textContent = 'Upload failed: ' + uploadError.message;
+            return;
+          }
+          filePaths.push(remotePath);
+        }
       }
 
       status.textContent = 'Sending email...';
@@ -78,7 +87,7 @@
             receiver: document.getElementById('receiver').value,
             subject: document.getElementById('subject').value,
             body: document.getElementById('body').value,
-            filePath,
+            filePaths,
           }),
         });
 
