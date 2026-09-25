@@ -5,6 +5,7 @@ import re
 import smtplib
 import mimetypes
 from email.message import EmailMessage
+from email.utils import formataddr
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
@@ -95,7 +96,7 @@ class handler(BaseHTTPRequestHandler):
         # --- 5. Build and send the email — same pattern as testmail.py ---
         msg = EmailMessage()
         msg["Subject"] = subject
-        msg["From"] = GMAIL_USER
+        msg["From"] = formataddr(("Cero Mailer", GMAIL_USER))
         msg["To"] = receiver
         msg.set_content(body_text)
 
