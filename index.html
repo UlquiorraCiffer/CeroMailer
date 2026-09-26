@@ -34,7 +34,7 @@
     <input type="text" id="subject" placeholder="Subject" required />
     <textarea id="body" placeholder="Body" rows="4"></textarea>
     <input type="file" id="file" multiple />
-    <button type="submit">Send</button>
+    <button type="submit" id="submitBtn">Send</button>
   </form>
   <p id="status"></p>
 
@@ -52,21 +52,24 @@
 
     document.getElementById('sendForm').addEventListener('submit', async (e) => {
       e.preventDefault();
+      const submitBtn = document.getElementById('submitBtn');
       const status = document.getElementById('status');
       const files = document.getElementById('file').files;
 
-      // Validate per-file size
-      for (const file of files) {
-        if (file.size > MAX_FILE_SIZE) {
-          status.textContent = `File "${file.name}" is too large (max 50MB).`;
-          return;
-        }
-      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Sending...';
 
-      // Step 1: Request server-issued upload session
-      status.textContent = 'Creating upload session...';
-      let sessionId;
       try {
+        // Validate per-file size
+        for (const file of files) {
+          if (file.size > MAX_FILE_SIZE) {
+            status.textContent = `File "${file.name}" is too large (max 50MB).`;
+            return;
+          }
+        }
+
+        // Step 1: Request server-issued upload session
+        status.textContent = 'Creating upload session...';
         const sessionRes = await fetch('/api/create-session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -79,33 +82,28 @@
         }
 
         const sessionData = await sessionRes.json();
-        sessionId = sessionData.sessionId;
-      } catch (err) {
-        status.textContent = 'Network error: ' + err.message;
-        return;
-      }
+        const sessionId = sessionData.sessionId;
 
-      // Step 2: Upload files under sessions/<sessionId>/<sanitized-original-filename>
-      if (files.length > 0) {
-        status.textContent = `Uploading ${files.length} file(s)...`;
-        for (const file of files) {
-          const safeName = sanitizeFileName(file.name);
-          const remotePath = `sessions/${sessionId}/${safeName}`;
-          const { error: uploadError } = await supabaseClient.storage
-            .from('uploads')
-            .upload(remotePath, file);
+        // Step 2: Upload files under sessions/<sessionId>/<sanitized-original-filename>
+        if (files.length > 0) {
+          status.textContent = `Uploading ${files.length} file(s)...`;
+          for (const file of files) {
+            const safeName = sanitizeFileName(file.name);
+            const remotePath = `sessions/${sessionId}/${safeName}`;
+            const { error: uploadError } = await supabaseClient.storage
+              .from('uploads')
+              .upload(remotePath, file);
 
-          if (uploadError) {
-            status.textContent = 'Upload failed: ' + uploadError.message;
-            return;
+            if (uploadError) {
+              status.textContent = 'Upload failed: ' + uploadError.message;
+              return;
+            }
           }
         }
-      }
 
-      // Step 3: Send email with session ID only
-      status.textContent = 'Sending email...';
+        // Step 3: Send email with session ID only
+        status.textContent = 'Sending email...';
 
-      try {
         const res = await fetch('/api/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -121,6 +119,9 @@
         status.textContent = res.ok ? 'Email sent!' : 'Error: ' + (result.error || 'Failed to send');
       } catch (err) {
         status.textContent = 'Network error: ' + err.message;
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Send';
       }
     });
   </script>
