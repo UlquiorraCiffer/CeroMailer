@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>Micro-Project-1 — Send a File</title>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
   <style>
     body {
       font-family: sans-serif;
@@ -39,12 +39,16 @@
   <p id="status"></p>
 
   <script>
-    // TODO: fill these in from your Supabase project settings (Settings > API)
+    // Supabase project credentials
     const SUPABASE_URL = "https://euduprorskqxcvecapfo.supabase.co";
     const SUPABASE_ANON_KEY = "sb_publishable_gxIe1B6z1ZGKecBOksly4w_H9nw1xFq"; // safe to expose, it's the public key
 
     const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+
+    function sanitizeFileName(name) {
+      return name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    }
 
     document.getElementById('sendForm').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -59,12 +63,34 @@
         }
       }
 
-      // Upload each selected file (if any)
-      const filePaths = [];
+      // Step 1: Request server-issued upload session
+      status.textContent = 'Creating upload session...';
+      let sessionId;
+      try {
+        const sessionRes = await fetch('/api/create-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+        if (!sessionRes.ok) {
+          const sessionErr = await sessionRes.json().catch(() => ({}));
+          status.textContent = 'Session creation failed: ' + (sessionErr.error || sessionRes.statusText);
+          return;
+        }
+
+        const sessionData = await sessionRes.json();
+        sessionId = sessionData.sessionId;
+      } catch (err) {
+        status.textContent = 'Network error: ' + err.message;
+        return;
+      }
+
+      // Step 2: Upload files under sessions/<sessionId>/<sanitized-original-filename>
       if (files.length > 0) {
         status.textContent = `Uploading ${files.length} file(s)...`;
         for (const file of files) {
-          const remotePath = `${Date.now()}_${file.name}`;
+          const safeName = sanitizeFileName(file.name);
+          const remotePath = `sessions/${sessionId}/${safeName}`;
           const { error: uploadError } = await supabaseClient.storage
             .from('uploads')
             .upload(remotePath, file);
@@ -73,10 +99,10 @@
             status.textContent = 'Upload failed: ' + uploadError.message;
             return;
           }
-          filePaths.push(remotePath);
         }
       }
 
+      // Step 3: Send email with session ID only
       status.textContent = 'Sending email...';
 
       try {
@@ -84,15 +110,15 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            sessionId,
             receiver: document.getElementById('receiver').value,
             subject: document.getElementById('subject').value,
             body: document.getElementById('body').value,
-            filePaths,
           }),
         });
 
         const result = await res.json();
-        status.textContent = res.ok ? 'Email sent!' : 'Error: ' + result.error;
+        status.textContent = res.ok ? 'Email sent!' : 'Error: ' + (result.error || 'Failed to send');
       } catch (err) {
         status.textContent = 'Network error: ' + err.message;
       }

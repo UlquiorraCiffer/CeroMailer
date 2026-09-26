@@ -3,10 +3,10 @@ import json
 import os
 import re
 import smtplib
+import ssl
 import mimetypes
 from email.message import EmailMessage
 from email.utils import formataddr
-from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
 supabase = create_client(
@@ -16,7 +16,7 @@ supabase = create_client(
 
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
-ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "*")
+ALLOWED_ORIGIN = os.environ["ALLOWED_ORIGIN"]
 
 EMAIL_REGEX = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -43,32 +43,7 @@ class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         ip = self.headers.get("x-forwarded-for", "").split(",")[0].strip() or self.client_address[0]
 
-        # --- 1. Rate limit: max 5 requests per IP in a 3 second window ---
-        three_seconds_ago = (datetime.now(timezone.utc) - timedelta(seconds=3)).isoformat()
-        recent = (
-            supabase.table("send_logs")
-            .select("id")
-            .eq("ip_address", ip)
-            .gte("created_at", three_seconds_ago)
-            .execute()
-        )
-        if len(recent.data) >= 5:
-            return self._send_json(429, {"error": "Too many requests, slow down"})
-
-        # --- 2. Daily cap: stop at 400 sends/day, well under Gmail's ~500 limit ---
-        start_of_day = datetime.now(timezone.utc).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).isoformat()
-        today = (
-            supabase.table("send_logs")
-            .select("id", count="exact")
-            .gte("created_at", start_of_day)
-            .execute()
-        )
-        if (today.count or 0) >= 400:
-            return self._send_json(429, {"error": "Daily limit reached, try tomorrow"})
-
-        # --- 3. Read and sanitize input ---
+        # --- 1. Read and sanitize input ---
         length = int(self.headers.get("Content-Length", 0))
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
@@ -78,22 +53,45 @@ class handler(BaseHTTPRequestHandler):
         receiver = strip_newlines(data.get("receiver"))
         subject = strip_newlines(data.get("subject")) or "(no subject)"
         body_text = data.get("body", "")
-        file_paths = data.get("filePaths") or []
+        session_id = data.get("sessionId")
 
         if not EMAIL_REGEX.match(receiver):
             return self._send_json(400, {"error": "Invalid receiver email address"})
 
-        # --- 4. Fetch files from Supabase Storage (uploaded there by the client) ---
+        # --- 2. Fetch files from Supabase Storage under sessions/<sessionId>/ ---
         attachments = []  # list of (file_name, file_bytes) tuples
-        for fp in file_paths:
+        file_paths = []
+        if session_id and re.match(r"^[a-zA-Z0-9_-]+$", str(session_id)):
             try:
-                fb = supabase.storage.from_("uploads").download(fp)
-                fn = fp.split("/")[-1]
-                attachments.append((fn, fb))
+                listed_files = supabase.storage.from_("uploads").list(f"sessions/{session_id}")
+                for item in listed_files:
+                    fn = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+                    if not fn or fn == ".emptyFolderPlaceholder":
+                        continue
+                    fp = f"sessions/{session_id}/{fn}"
+                    file_paths.append(fp)
+                    fb = supabase.storage.from_("uploads").download(fp)
+                    attachments.append((fn, fb))
             except Exception:
-                return self._send_json(400, {"error": f"Could not fetch uploaded file: {fp}"})
+                return self._send_json(400, {"error": "Could not fetch uploaded session files"})
 
-        # --- 5. Build and send the email — same pattern as testmail.py ---
+        # --- 3. Atomic rate limiting, daily cap check, and logging ---
+        logged_names = ", ".join(fn for fn, _ in attachments) or None
+        try:
+            rpc_res = supabase.rpc(
+                "check_and_log_send",
+                {
+                    "p_ip": ip,
+                    "p_receiver": receiver,
+                    "p_file_name": logged_names,
+                },
+            ).execute()
+            if not rpc_res.data:
+                return self._send_json(429, {"error": "Rate limit or daily limit reached, try later"})
+        except Exception:
+            return self._send_json(500, {"error": "Failed to verify rate limits"})
+
+        # --- 4. Build and send the email ---
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = formataddr(("Cero Mailer", GMAIL_USER))
@@ -108,20 +106,19 @@ class handler(BaseHTTPRequestHandler):
             msg.add_attachment(file_bytes, maintype=main_type, subtype=sub_type, filename=file_name)
 
         try:
+            ssl_context = ssl.create_default_context()
             with smtplib.SMTP("smtp.gmail.com", 587) as server:
-                server.starttls()
+                server.starttls(context=ssl_context)
                 server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
                 server.send_message(msg)
         except Exception:
             return self._send_json(500, {"error": "Failed to send email"})
 
-        # --- 6. Log the send, then clean up the temp files ---
-        logged_names = ", ".join(fn for fn, _ in attachments) or None
-        supabase.table("send_logs").insert(
-            {"ip_address": ip, "receiver": receiver, "file_name": logged_names}
-        ).execute()
-
+        # --- 5. Clean up uploaded temporary session files ---
         if file_paths:
-            supabase.storage.from_("uploads").remove(file_paths)
+            try:
+                supabase.storage.from_("uploads").remove(file_paths)
+            except Exception:
+                pass
 
         return self._send_json(200, {"success": True})

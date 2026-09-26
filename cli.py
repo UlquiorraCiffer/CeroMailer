@@ -1,6 +1,6 @@
 import os
 import sys
-import time
+import re
 import mimetypes
 import requests
 
@@ -8,14 +8,28 @@ import requests
 # not a secret. The actual Gmail credentials never leave Vercel.
 SUPABASE_URL = "https://euduprorskqxcvecapfo.supabase.co"
 SUPABASE_ANON_KEY = "sb_publishable_gxIe1B6z1ZGKecBOksly4w_H9nw1xFq"
-VERCEL_API_URL = "https://cero-mailer.vercel.app/api/send"
+VERCEL_BASE_URL = "https://cero-mailer.vercel.app"
+CREATE_SESSION_URL = f"{VERCEL_BASE_URL}/api/create-session"
+SEND_API_URL = f"{VERCEL_BASE_URL}/api/send"
 
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 
-def upload_file(file_path):
-    file_name = os.path.basename(file_path)
-    remote_path = f"{int(time.time() * 1000)}_{file_name}"
+def sanitize_filename(filename):
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+
+
+def create_session():
+    response = requests.post(CREATE_SESSION_URL)
+    if not response.ok:
+        raise RuntimeError(f"{response.status_code}: {response.text}")
+    data = response.json()
+    return data["sessionId"]
+
+
+def upload_file(session_id, file_path):
+    file_name = sanitize_filename(os.path.basename(file_path))
+    remote_path = f"sessions/{session_id}/{file_name}"
 
     mime_type, _ = mimetypes.guess_type(file_path)
     if mime_type is None:
@@ -38,14 +52,15 @@ def upload_file(file_path):
     return remote_path
 
 
-def send_email(receiver, subject, body, remote_paths):
+def send_email(session_id, receiver, subject, body):
     payload = {
+        "sessionId": session_id,
         "receiver": receiver,
         "subject": subject,
         "body": body,
-        "filePaths": remote_paths,
     }
-    return requests.post(VERCEL_API_URL, json=payload)
+    return requests.post(SEND_API_URL, json=payload)
+
 
 def open_file_picker():
     """Open the native OS file-picker (multi-select). Returns a tuple of paths (possibly empty)."""
@@ -89,21 +104,28 @@ def main():
             print(f"File too large (max 50MB): {fp}")
             sys.exit(1)
 
-    # Upload each file
-    remote_paths = []
+    # 1. Request server-issued session ID
+    try:
+        session_id = create_session()
+    except Exception as e:
+        print(f"Failed to create upload session: {e}")
+        sys.exit(1)
+
+    # 2. Upload each file under sessions/<sessionId>/...
     if file_paths:
         print(f"Uploading {len(file_paths)} file(s)...")
         for fp in file_paths:
             try:
-                remote_paths.append(upload_file(fp))
+                upload_file(session_id, fp)
             except Exception as e:
                 print(f"Upload failed for {os.path.basename(fp)}: {e}")
                 sys.exit(1)
     else:
         print("No files selected — sending without attachments.")
 
+    # 3. Send email with sessionId
     print("Sending email...")
-    response = send_email(receiver, subject, body, remote_paths)
+    response = send_email(session_id, receiver, subject, body)
 
     if response.ok:
         print("Email sent!")
